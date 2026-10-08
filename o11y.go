@@ -110,6 +110,7 @@ type Server struct {
 	cfg      Config
 	registry *prometheus.Registry
 	metrics  *metrics
+	mux      *http.ServeMux
 	http     *http.Server
 	snapshot atomic.Pointer[readySnapshot]
 	draining atomic.Bool
@@ -140,13 +141,13 @@ func Init(cfg Config) (*Server, error) {
 		s.metrics.depInfo.WithLabelValues(d.Name, string(d.Kind), strconv.FormatBool(d.critical())).Set(1)
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("GET /ready", s.handleReady)
-	mux.Handle("GET /dependencies", s.requireAuth(http.HandlerFunc(s.handleDependencies)))
-	mux.Handle("GET /version", s.requireAuth(http.HandlerFunc(s.handleVersion)))
-	mux.Handle("GET /metrics", s.requireAuth(promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{})))
-	s.http = &http.Server{Addr: cfg.Addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	s.mux = http.NewServeMux()
+	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /ready", s.handleReady)
+	s.mux.Handle("GET /dependencies", s.requireAuth(http.HandlerFunc(s.handleDependencies)))
+	s.mux.Handle("GET /version", s.requireAuth(http.HandlerFunc(s.handleVersion)))
+	s.mux.Handle("GET /metrics", s.requireAuth(promhttp.HandlerFor(s.registry, promhttp.HandlerOpts{})))
+	s.http = &http.Server{Addr: cfg.Addr, Handler: s.mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
 }
 
@@ -300,6 +301,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) Registry() *prometheus.Registry { return s.registry }
 
 func (s *Server) Addr() string { return s.cfg.Addr }
+
+// Handle mounts an extra route on the admin server behind the bearer token,
+// e.g. a Prometheus service-discovery endpoint. Call it before Start.
+// Patterns use net/http ServeMux syntax and panic if they clash with built-ins.
+func (s *Server) Handle(pattern string, h http.Handler) {
+	s.mux.Handle(pattern, s.requireAuth(h))
+}
 
 func (s *Server) evaluate(ctx context.Context) {
 	results := make(map[string]depResult, len(s.cfg.Dependencies))
